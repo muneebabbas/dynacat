@@ -2122,6 +2122,34 @@ function setupWidgetPolling() {
     }
 }
 
+function captureViewportAnchor() {
+    const widget = Array.from(document.querySelectorAll('.widget')).find(w => {
+        if (w.querySelector('.widget')) return false;
+        return isRectInViewport(w.getBoundingClientRect());
+    });
+    if (!widget) return null;
+    return {
+        widget,
+        widgetId: widget.dataset.widgetId || null,
+        topBefore: widget.getBoundingClientRect().top,
+    };
+}
+
+function restoreViewportAnchor(anchor, behavior) {
+    if (!anchor) return;
+    let liveAnchor = anchor.widget;
+    if (!liveAnchor.isConnected) {
+        liveAnchor = anchor.widgetId
+            ? document.querySelector(`.widget[data-widget-id="${anchor.widgetId}"]`)
+            : null;
+    }
+    if (!liveAnchor || !liveAnchor.isConnected) return;
+    const delta = liveAnchor.getBoundingClientRect().top - anchor.topBefore;
+    if (Math.abs(delta) > 1) {
+        window.scrollBy({ top: delta, behavior });
+    }
+}
+
 async function applyContentUpdate() {
     const response = await fetchPageContent(pageData);
     const pageContent = response.content;
@@ -2292,6 +2320,8 @@ function _applyWidgetUpdate(widgetId, html) {
     const prevAnchor = htmlElem.style.overflowAnchor;
     htmlElem.style.overflowAnchor = 'none';
 
+    const viewportAnchor = captureViewportAnchor();
+
     try {
         target.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
         Idiomorph.morph(target, html, { morphStyle: 'outerHTML' });
@@ -2323,6 +2353,7 @@ function _applyWidgetUpdate(widgetId, html) {
         }
 
         _runPostSettleSetup();
+        restoreViewportAnchor(viewportAnchor, 'instant');
         notifyWidgetUpdated(liveTarget);
 
     } finally {
