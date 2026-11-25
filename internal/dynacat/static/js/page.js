@@ -1298,7 +1298,7 @@ async function preloadCalendars() {
     return calendarModule;
 }
 
-function initCalendarsSync() {
+function initLoadedCalendars() {
     if (!calendarModule) return;
     const elems = Array.from(document.getElementsByClassName("calendar"));
     for (let i = 0; i < elems.length; i++)
@@ -1311,7 +1311,7 @@ async function setupCalendars() {
 
     // TODO: implement prefetching, currently loads as a nasty waterfall of requests
     await preloadCalendars();
-    initCalendarsSync();
+    initLoadedCalendars();
 }
 
 async function setupTodos() {
@@ -1607,6 +1607,57 @@ async function fetchWidgetContent(widgetElement) {
     }
 }
 
+function hasWidgetContentChanged(targetWidget, sourceWidget) {
+    const oldContent = targetWidget.querySelector('.widget-content');
+    const newContent = sourceWidget.querySelector('.widget-content');
+    if (!oldContent || !newContent) {
+        return false;
+    }
+
+    if (oldContent.outerHTML !== newContent.outerHTML) {
+        return true;
+    }
+
+    const oldHeader = targetWidget.querySelector('.widget-header');
+    const newHeader = sourceWidget.querySelector('.widget-header');
+    return Boolean(oldHeader && newHeader && oldHeader.innerHTML !== newHeader.innerHTML);
+}
+
+function syncWidgetHiddenState(targetWidget, sourceWidget) {
+    const shouldBeHidden = sourceWidget.dataset.widgetHidden === "true";
+    const wasHidden = targetWidget.dataset.widgetHidden === "true";
+
+    if (shouldBeHidden) {
+        targetWidget.dataset.widgetHidden = "true";
+    } else {
+        targetWidget.removeAttribute("data-widget-hidden");
+    }
+
+    return shouldBeHidden !== wasHidden;
+}
+
+function runPostSwapSetup() {
+    const callbacksIndexBefore = contentReadyCallbacks.length;
+
+    setupClocks();
+    initLoadedCalendars();
+    setupPopovers();
+    setupCarousels();
+    setupCollapsibleLists();
+    setupCollapsibleGrids();
+    setupGroups();
+    setupMasonries();
+    setupDynamicRelativeTime();
+    setupImageFallbacks();
+    setupLazyImages();
+    setupTruncatedElementTitles();
+
+    const newCallbacks = contentReadyCallbacks.splice(callbacksIndexBefore);
+    for (const cb of newCallbacks) {
+        cb();
+    }
+}
+
 async function updateWidget(widgetElement) {
     const newWidget = await fetchWidgetContent(widgetElement);
     if (!newWidget || !widgetElement.isConnected) {
@@ -1617,7 +1668,7 @@ async function updateWidget(widgetElement) {
 
     const oldContent = widgetElement.querySelector('.widget-content');
     const newContent = newWidget.querySelector('.widget-content');
-    const willReplaceContent = Boolean(oldContent && newContent) && widgetElement.outerHTML !== newWidget.outerHTML;
+    const willReplaceContent = hasWidgetContentChanged(widgetElement, newWidget);
 
     if (willReplaceContent && newContent.querySelector('.calendar')) {
         await preloadCalendars().catch(error => console.error('Calendar setup failed', error));
@@ -1627,16 +1678,10 @@ async function updateWidget(widgetElement) {
         return;
     }
 
-    const scrollAnchor = captureScrollAnchor(widgetElement.closest('.page-column'));
+    const scrollAnchors = captureScrollAnchors(widgetElement.closest('.page-column'));
     const collapsibleContainerStates = getCollapsibleContainerStates(widgetElement);
     const groupTabStates = getGroupTabStates(widgetElement);
-
-    const hiddenChanged = (widgetElement.dataset.widgetHidden === "true") !== (newWidget.dataset.widgetHidden === "true");
-    if (newWidget.dataset.widgetHidden === "true") {
-        widgetElement.dataset.widgetHidden = "true";
-    } else {
-        widgetElement.removeAttribute("data-widget-hidden");
-    }
+    const hiddenChanged = syncWidgetHiddenState(widgetElement, newWidget);
 
     if (willReplaceContent) {
         const savedInputs = {};
@@ -1660,34 +1705,14 @@ async function updateWidget(widgetElement) {
             oldHeader.innerHTML = newHeader.innerHTML;
         }
 
-        const callbacksIndexBefore = contentReadyCallbacks.length;
-
-        setupClocks();
-        initCalendarsSync();
-        setupPopovers();
-        setupCarousels();
-        setupCollapsibleLists();
-        setupCollapsibleGrids();
-        setupGroups();
-        setupMasonries();
-        setupDynamicRelativeTime();
-        setupImageFallbacks();
-        setupLazyImages();
-        setupTruncatedElementTitles();
-
-        const newCallbacks = contentReadyCallbacks.splice(callbacksIndexBefore);
-        for (const cb of newCallbacks) {
-            cb();
-        }
-
+        runPostSwapSetup();
         restoreCollapsibleContainerStates(widgetElement, collapsibleContainerStates);
         setupPlayingProgressUpdater();
-        setupPlayingThumbnailCropping();
         notifyWidgetUpdated(widgetElement);
     }
 
     if (willReplaceContent || hiddenChanged) {
-        restoreScrollAnchor(scrollAnchor);
+        restoreScrollAnchors(scrollAnchors);
     }
 }
 
@@ -1762,53 +1787,60 @@ function isRectInViewport(rect) {
         && rect.left < window.innerWidth;
 }
 
-function findVisibleAnchorWidget(scope = null) {
-    const containers = scope
-        ? [scope]
-        : document.querySelectorAll('.head-widgets, .page-column');
-
-    for (const container of containers) {
-        for (const child of container.children) {
-            if (!child.classList.contains('widget')) continue;
-            if (isRectInViewport(child.getBoundingClientRect())) {
-                return child;
-            }
+function findVisibleAnchorWidget(container) {
+    for (const child of container.children) {
+        if (!child.classList.contains('widget')) continue;
+        if (isRectInViewport(child.getBoundingClientRect())) {
+            return child;
         }
     }
 
     return null;
 }
 
-function captureScrollAnchor(preferredScope = null) {
+function captureScrollAnchors(preferredScope = null) {
     if (window.scrollY <= 0) {
-        return null;
+        return [];
     }
 
-    const widget = (preferredScope && findVisibleAnchorWidget(preferredScope)) || findVisibleAnchorWidget();
-    if (!widget) {
-        return null;
+    const containers = preferredScope
+        ? [preferredScope]
+        : Array.from(document.querySelectorAll('.head-widgets, .page-column'));
+
+    const anchors = [];
+    for (const container of containers) {
+        const widget = findVisibleAnchorWidget(container);
+        if (widget) {
+            anchors.push({
+                widget,
+                topBefore: widget.getBoundingClientRect().top,
+            });
+        }
     }
 
-    return {
-        widget,
-        topBefore: widget.getBoundingClientRect().top,
-    };
+    if (anchors.length === 0 && preferredScope) {
+        return captureScrollAnchors(null);
+    }
+
+    return anchors;
 }
 
-function restoreScrollAnchor(anchor) {
-    if (!anchor || !anchor.widget.isConnected) {
-        return;
-    }
+function restoreScrollAnchors(anchors) {
+    for (const anchor of anchors) {
+        if (!anchor.widget.isConnected) {
+            continue;
+        }
 
-    const rectAfter = anchor.widget.getBoundingClientRect();
-    if (rectAfter.width === 0 && rectAfter.height === 0) {
-        return;
-    }
+        const rectAfter = anchor.widget.getBoundingClientRect();
+        if (rectAfter.width === 0 || rectAfter.height === 0) {
+            continue;
+        }
 
-    const topDelta = rectAfter.top - anchor.topBefore;
-
-    if (Math.abs(topDelta) > 1) {
-        window.scrollBy({ top: topDelta, behavior: 'instant' });
+        const topDelta = rectAfter.top - anchor.topBefore;
+        if (Math.abs(topDelta) > 1) {
+            window.scrollBy({ top: topDelta, behavior: 'instant' });
+            return;
+        }
     }
 }
 
@@ -2096,12 +2128,17 @@ async function applyContentUpdate() {
     const tempDiv = document.createElement("div");
     tempDiv.innerHTML = pageContent;
 
+    if (tempDiv.querySelector('.widget[data-update-interval] .calendar')) {
+        await preloadCalendars().catch(error => console.error('Calendar setup failed', error));
+    }
+
     const realContainers = Array.from(document.querySelectorAll(".head-widgets, .page-column"));
     const tempContainers = Array.from(tempDiv.querySelectorAll(".head-widgets, .page-column"));
 
-    const scrollAnchor = captureScrollAnchor();
+    const scrollAnchors = captureScrollAnchors();
 
     let anyReplaced = false;
+    let anyHiddenChanged = false;
     const collapsibleStatesMap = new Map();
     const groupTabStatesMap = new Map();
     const updatedWidgets = [];
@@ -2117,23 +2154,23 @@ async function applyContentUpdate() {
             collapsibleStatesMap.set(realWidget, getCollapsibleContainerStates(realWidget));
             groupTabStatesMap.set(realWidget, getGroupTabStates(realWidget));
 
-            if (realWidget.dataset.updateInterval && realWidget.outerHTML !== tempWidget.outerHTML) {
-                const oldContent = realWidget.querySelector('.widget-content');
-                const newContent = tempWidget.querySelector('.widget-content');
+            if (realWidget.dataset.updateInterval) {
+                const willReplaceContent = hasWidgetContentChanged(realWidget, tempWidget);
+                if (syncWidgetHiddenState(realWidget, tempWidget)) {
+                    anyHiddenChanged = true;
+                }
 
-                if (oldContent && newContent) {
+                if (willReplaceContent) {
+                    const oldContent = realWidget.querySelector('.widget-content');
+                    const newContent = tempWidget.querySelector('.widget-content');
+
+                    oldContent.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
                     updateContentPreservingImages(oldContent, newContent);
 
                     const oldHeader = realWidget.querySelector('.widget-header');
                     const newHeader = tempWidget.querySelector('.widget-header');
                     if (oldHeader && newHeader && oldHeader.innerHTML !== newHeader.innerHTML) {
                         oldHeader.innerHTML = newHeader.innerHTML;
-                    }
-
-                    if (tempWidget.dataset.widgetHidden === "true") {
-                        realWidget.dataset.widgetHidden = "true";
-                    } else {
-                        realWidget.removeAttribute("data-widget-hidden");
                     }
 
                     anyReplaced = true;
@@ -2144,28 +2181,11 @@ async function applyContentUpdate() {
     }
 
     if (anyReplaced) {
-        const callbacksIndexBefore = contentReadyCallbacks.length;
-
         for (const [widget, states] of groupTabStatesMap) {
             restoreGroupTabStates(widget, states);
         }
 
-        setupClocks();
-        setupPopovers();
-        setupCarousels();
-        setupCollapsibleLists();
-        setupCollapsibleGrids();
-        setupGroups();
-        setupMasonries();
-        setupImageFallbacks();
-        setupLazyImages();
-        setupTruncatedElementTitles();
-        setupPlayingThumbnailCropping();
-
-        const newCallbacks = contentReadyCallbacks.splice(callbacksIndexBefore);
-        for (const cb of newCallbacks) {
-            cb();
-        }
+        runPostSwapSetup();
 
         for (const [widget, states] of collapsibleStatesMap) {
             restoreCollapsibleContainerStates(widget, states);
@@ -2175,8 +2195,10 @@ async function applyContentUpdate() {
         for (const widget of updatedWidgets) {
             notifyWidgetUpdated(widget);
         }
+    }
 
-        restoreScrollAnchor(scrollAnchor);
+    if (anyReplaced || anyHiddenChanged) {
+        restoreScrollAnchors(scrollAnchors);
     }
 }
 
