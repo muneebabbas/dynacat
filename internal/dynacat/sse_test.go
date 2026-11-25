@@ -128,22 +128,44 @@ func assertContainerBroadcastsOnlyDueLeaf(t *testing.T, container widget, dueChi
 	return msgs[0]
 }
 
-func TestSSECheckAndPushUpdatesSkipsSplitColumnContainer(t *testing.T) {
-	dueChild := newSSETestLeaf(true)
-	freshChild := newSSETestLeaf(false)
-
+func newSSETestSplitColumn(t *testing.T, children ...widget) *splitColumnWidget {
+	t.Helper()
 	container := &splitColumnWidget{
 		widgetBase: widgetBase{
 			ID:   widgetIDCounter.Add(1),
 			Type: "split-column",
 		},
 		containerWidgetBase: containerWidgetBase{
-			Widgets: widgets{dueChild, freshChild},
+			Widgets: widgets(children),
 		},
 	}
 	if err := container.initialize(); err != nil {
 		t.Fatalf("splitColumnWidget.initialize() error = %v", err)
 	}
+	return container
+}
+
+func newSSETestGroup(t *testing.T, children ...widget) *groupWidget {
+	t.Helper()
+	container := &groupWidget{
+		widgetBase: widgetBase{
+			ID:   widgetIDCounter.Add(1),
+			Type: "group",
+		},
+		containerWidgetBase: containerWidgetBase{
+			Widgets: widgets(children),
+		},
+	}
+	if err := container.initialize(); err != nil {
+		t.Fatalf("groupWidget.initialize() error = %v", err)
+	}
+	return container
+}
+
+func TestSSECheckAndPushUpdatesSkipsSplitColumnContainer(t *testing.T) {
+	dueChild := newSSETestLeaf(true)
+	freshChild := newSSETestLeaf(false)
+	container := newSSETestSplitColumn(t, dueChild, freshChild)
 
 	assertContainerBroadcastsOnlyDueLeaf(t, container, dueChild, freshChild)
 }
@@ -151,19 +173,7 @@ func TestSSECheckAndPushUpdatesSkipsSplitColumnContainer(t *testing.T) {
 func TestSSECheckAndPushUpdatesSkipsGroupContainerAndPreservesHideHeader(t *testing.T) {
 	dueChild := newSSETestLeaf(true)
 	freshChild := newSSETestLeaf(false)
-
-	container := &groupWidget{
-		widgetBase: widgetBase{
-			ID:   widgetIDCounter.Add(1),
-			Type: "group",
-		},
-		containerWidgetBase: containerWidgetBase{
-			Widgets: widgets{dueChild, freshChild},
-		},
-	}
-	if err := container.initialize(); err != nil {
-		t.Fatalf("groupWidget.initialize() error = %v", err)
-	}
+	container := newSSETestGroup(t, dueChild, freshChild)
 
 	msg := assertContainerBroadcastsOnlyDueLeaf(t, container, dueChild, freshChild)
 	if strings.Contains(msg.HTML, `class="widget-header"`) {
@@ -173,32 +183,10 @@ func TestSSECheckAndPushUpdatesSkipsGroupContainerAndPreservesHideHeader(t *test
 
 func TestSSECheckAndPushUpdatesIgnoresRegisteredContainersDirectly(t *testing.T) {
 	splitLeaf := newSSETestLeaf(true)
-	splitContainer := &splitColumnWidget{
-		widgetBase: widgetBase{
-			ID:   widgetIDCounter.Add(1),
-			Type: "split-column",
-		},
-		containerWidgetBase: containerWidgetBase{
-			Widgets: widgets{splitLeaf},
-		},
-	}
-	if err := splitContainer.initialize(); err != nil {
-		t.Fatalf("splitColumnWidget.initialize() error = %v", err)
-	}
+	splitContainer := newSSETestSplitColumn(t, splitLeaf)
 
 	groupLeaf := newSSETestLeaf(true)
-	groupContainer := &groupWidget{
-		widgetBase: widgetBase{
-			ID:   widgetIDCounter.Add(1),
-			Type: "group",
-		},
-		containerWidgetBase: containerWidgetBase{
-			Widgets: widgets{groupLeaf},
-		},
-	}
-	if err := groupContainer.initialize(); err != nil {
-		t.Fatalf("groupWidget.initialize() error = %v", err)
-	}
+	groupContainer := newSSETestGroup(t, groupLeaf)
 
 	// Register only the containers (without their children) to deterministically verify
 	// sseCheckAndPushUpdates never updates or broadcasts containers directly.

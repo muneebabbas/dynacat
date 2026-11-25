@@ -2033,14 +2033,35 @@ function setupWidgetPolling() {
     }
 }
 
-function findViewportAnchorWidget() {
-    return Array.from(document.querySelectorAll('.widget')).find(w => {
+function captureViewportAnchor() {
+    const widget = Array.from(document.querySelectorAll('.widget')).find(w => {
         if (w.querySelector('.widget')) return false;
         const rect = w.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 &&
             rect.bottom > 0 && rect.top < window.innerHeight &&
             rect.right > 0 && rect.left < window.innerWidth;
-    }) || null;
+    });
+    if (!widget) return null;
+    return {
+        widget,
+        widgetId: widget.dataset.widgetId || null,
+        topBefore: widget.getBoundingClientRect().top,
+    };
+}
+
+function restoreViewportAnchor(anchor, behavior) {
+    if (!anchor) return;
+    let liveAnchor = anchor.widget;
+    if (!liveAnchor.isConnected) {
+        liveAnchor = anchor.widgetId
+            ? document.querySelector(`.widget[data-widget-id="${anchor.widgetId}"]`)
+            : null;
+    }
+    if (!liveAnchor || !liveAnchor.isConnected) return;
+    const delta = liveAnchor.getBoundingClientRect().top - anchor.topBefore;
+    if (Math.abs(delta) > 1) {
+        window.scrollBy({ top: delta, behavior });
+    }
 }
 
 async function applyContentUpdate() {
@@ -2049,8 +2070,7 @@ async function applyContentUpdate() {
     const refreshStartedAt = nowMs();
     const scrollThreshold = 100;
     const wasAtBottom = (window.innerHeight + window.scrollY) >= (document.documentElement.scrollHeight - scrollThreshold);
-    const anchorWidget = findViewportAnchorWidget();
-    const anchorTopBefore = anchorWidget ? anchorWidget.getBoundingClientRect().top : null;
+    const viewportAnchor = captureViewportAnchor();
     const response = await fetchPageContent(pageData);
     const pageContent = response.content;
     const tempDiv = document.createElement("div");
@@ -2142,12 +2162,8 @@ async function applyContentUpdate() {
                 if (Math.abs(window.scrollY - maxScroll) > 1) {
                     window.scrollTo({ top: maxScroll, behavior: 'auto' });
                 }
-            } else if (anchorWidget && anchorTopBefore != null) {
-                const anchorTopAfter = anchorWidget.getBoundingClientRect().top;
-                const topDelta = anchorTopAfter - anchorTopBefore;
-                if (Math.abs(topDelta) > 1) {
-                    window.scrollBy({ top: topDelta, behavior: 'auto' });
-                }
+            } else {
+                restoreViewportAnchor(viewportAnchor, 'auto');
             }
         }
     }
@@ -2243,8 +2259,7 @@ function _applyWidgetUpdate(widgetId, html) {
     const prevAnchor = htmlElem.style.overflowAnchor;
     htmlElem.style.overflowAnchor = 'none';
 
-    const anchorWidget = findViewportAnchorWidget();
-    const anchorTopBefore = anchorWidget ? anchorWidget.getBoundingClientRect().top : null;
+    const viewportAnchor = captureViewportAnchor();
 
     try {
         target.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
@@ -2277,15 +2292,7 @@ function _applyWidgetUpdate(widgetId, html) {
         }
 
         _runPostSettleSetup();
-
-        const liveAnchor = anchorWidget?.isConnected ? anchorWidget : (anchorWidget === target ? liveTarget : null);
-        if (liveAnchor && anchorTopBefore !== null) {
-            const delta = liveAnchor.getBoundingClientRect().top - anchorTopBefore;
-            if (Math.abs(delta) > 1) {
-                window.scrollBy({ top: delta, behavior: 'instant' });
-            }
-        }
-
+        restoreViewportAnchor(viewportAnchor, 'instant');
         notifyWidgetUpdated(liveTarget);
 
     } finally {
