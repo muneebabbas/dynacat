@@ -388,6 +388,11 @@ func (a *application) sseCheckAndPushUpdates(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	for widgetID, w := range a.widgetByID {
+		switch w.(type) {
+		case *splitColumnWidget, *groupWidget:
+			continue
+		}
+
 		if !w.requiresUpdate(&now) {
 			continue
 		}

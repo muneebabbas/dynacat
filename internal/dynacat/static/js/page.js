@@ -2236,6 +2236,14 @@ function _applyWidgetUpdate(widgetId, html) {
     const prevAnchor = htmlElem.style.overflowAnchor;
     htmlElem.style.overflowAnchor = 'none';
 
+    const anchorWidget = Array.from(document.querySelectorAll('.widget')).find(w => {
+        const rect = w.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 &&
+            rect.bottom > 0 && rect.top < window.innerHeight &&
+            rect.right > 0 && rect.left < window.innerWidth;
+    }) || null;
+    const anchorTopBefore = anchorWidget ? anchorWidget.getBoundingClientRect().top : null;
+
     try {
         target.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
         Idiomorph.morph(target, html, { morphStyle: 'outerHTML' });
@@ -2267,6 +2275,15 @@ function _applyWidgetUpdate(widgetId, html) {
         }
 
         _runPostSettleSetup();
+
+        const liveAnchor = anchorWidget?.isConnected ? anchorWidget : (anchorWidget === target ? liveTarget : null);
+        if (liveAnchor && anchorTopBefore !== null) {
+            const delta = liveAnchor.getBoundingClientRect().top - anchorTopBefore;
+            if (Math.abs(delta) > 1) {
+                window.scrollBy({ top: delta, behavior: 'instant' });
+            }
+        }
+
         notifyWidgetUpdated(liveTarget);
 
     } finally {
