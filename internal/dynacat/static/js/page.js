@@ -1282,15 +1282,36 @@ function setupClocks() {
     }
 }
 
+let calendarModule = null;
+let calendarModulePromise = null;
+
+async function preloadCalendars() {
+    if (!calendarModule) {
+        if (!calendarModulePromise) {
+            calendarModulePromise = import('./calendar.js').catch(error => {
+                calendarModulePromise = null;
+                throw error;
+            });
+        }
+        calendarModule = await calendarModulePromise;
+    }
+    return calendarModule;
+}
+
+function initLoadedCalendars() {
+    if (!calendarModule) return;
+    const elems = Array.from(document.getElementsByClassName("calendar"));
+    for (let i = 0; i < elems.length; i++)
+        calendarModule.default(elems[i]);
+}
+
 async function setupCalendars() {
     const elems = Array.from(document.getElementsByClassName("calendar"));
     if (elems.length == 0) return;
 
     // TODO: implement prefetching, currently loads as a nasty waterfall of requests
-    const calendar = await import ('./calendar.js');
-
-    for (let i = 0; i < elems.length; i++)
-        calendar.default(elems[i]);
+    await preloadCalendars();
+    initLoadedCalendars();
 }
 
 async function setupTodos() {
@@ -1586,84 +1607,112 @@ async function fetchWidgetContent(widgetElement) {
     }
 }
 
-async function updateWidget(widgetElement) {
-    setupUserScrollIntentTracking();
-
-    const refreshStartedAt = nowMs();
-    const widgetTopBefore = widgetElement.getBoundingClientRect().top;
-    const collapsibleContainerStates = getCollapsibleContainerStates(widgetElement);
-    const groupTabStates = getGroupTabStates(widgetElement);
-    const newWidget = await fetchWidgetContent(widgetElement);
-
-    if (newWidget) {
-        if (newWidget.dataset.widgetHidden === "true") {
-            widgetElement.dataset.widgetHidden = "true";
-        } else {
-            widgetElement.removeAttribute("data-widget-hidden");
-        }
-
-        syncWidgetUpdateInterval(widgetElement, newWidget);
+function hasWidgetContentChanged(targetWidget, sourceWidget) {
+    const oldContent = targetWidget.querySelector('.widget-content');
+    const newContent = sourceWidget.querySelector('.widget-content');
+    if (!oldContent || !newContent) {
+        return false;
     }
 
-    if (newWidget && widgetElement.outerHTML !== newWidget.outerHTML) {
-        const oldContent = widgetElement.querySelector('.widget-content');
-        const newContent = newWidget.querySelector('.widget-content');
+    if (oldContent.outerHTML !== newContent.outerHTML) {
+        return true;
+    }
 
-        if (oldContent && newContent) {
-            const savedInputs = {};
-            for (const input of oldContent.querySelectorAll('input[id]')) {
-                if (input.value) savedInputs[input.id] = input.value;
-            }
+    const oldHeader = targetWidget.querySelector('.widget-header');
+    const newHeader = sourceWidget.querySelector('.widget-header');
+    return Boolean(oldHeader && newHeader && oldHeader.innerHTML !== newHeader.innerHTML);
+}
 
-            oldContent.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
-            updateContentPreservingImages(oldContent, newContent);
+function syncWidgetHiddenState(targetWidget, sourceWidget) {
+    const shouldBeHidden = sourceWidget.dataset.widgetHidden === "true";
+    const wasHidden = targetWidget.dataset.widgetHidden === "true";
 
-            for (const [id, value] of Object.entries(savedInputs)) {
-                const input = newContent.querySelector('#' + id);
-                if (input) input.value = value;
-            }
+    if (shouldBeHidden) {
+        targetWidget.dataset.widgetHidden = "true";
+    } else {
+        targetWidget.removeAttribute("data-widget-hidden");
+    }
 
-            restoreGroupTabStates(widgetElement, groupTabStates);
+    return shouldBeHidden !== wasHidden;
+}
 
-            const oldHeader = widgetElement.querySelector('.widget-header');
-            const newHeader = newWidget.querySelector('.widget-header');
-            if (oldHeader && newHeader && oldHeader.innerHTML !== newHeader.innerHTML) {
-                oldHeader.innerHTML = newHeader.innerHTML;
-            }
+function runPostSwapSetup() {
+    const callbacksIndexBefore = contentReadyCallbacks.length;
 
-            const callbacksIndexBefore = contentReadyCallbacks.length;
+    setupClocks();
+    initLoadedCalendars();
+    setupPopovers();
+    setupCarousels();
+    setupCollapsibleLists();
+    setupCollapsibleGrids();
+    setupGroups();
+    setupMasonries();
+    setupDynamicRelativeTime();
+    setupImageFallbacks();
+    setupLazyImages();
+    setupTruncatedElementTitles();
 
-            setupClocks();
-            await setupCalendars().catch(error => console.error('Calendar setup failed', error));
-            setupPopovers();
-            setupCarousels();
-            setupCollapsibleLists();
-            setupCollapsibleGrids();
-            setupGroups();
-            setupMasonries();
-            setupDynamicRelativeTime();
-            setupImageFallbacks();
-            setupLazyImages();
-            setupTruncatedElementTitles();
+    const newCallbacks = contentReadyCallbacks.splice(callbacksIndexBefore);
+    for (const cb of newCallbacks) {
+        cb();
+    }
+}
 
-            const newCallbacks = contentReadyCallbacks.splice(callbacksIndexBefore);
-            for (const cb of newCallbacks) {
-                cb();
-            }
+async function updateWidget(widgetElement) {
+    const newWidget = await fetchWidgetContent(widgetElement);
+    if (!newWidget || !widgetElement.isConnected) {
+        return;
+    }
 
-            restoreCollapsibleContainerStates(widgetElement, collapsibleContainerStates);
-            setupPlayingProgressUpdater();
-            setupPlayingThumbnailCropping();
-            notifyWidgetUpdated(widgetElement);
+    syncWidgetUpdateInterval(widgetElement, newWidget);
 
-            const widgetTopAfter = widgetElement.getBoundingClientRect().top;
-            const topDelta = widgetTopAfter - widgetTopBefore;
-            const userScrolledDuringRefresh = lastUserScrollIntentAt > refreshStartedAt;
+    const oldContent = widgetElement.querySelector('.widget-content');
+    const newContent = newWidget.querySelector('.widget-content');
+    const willReplaceContent = hasWidgetContentChanged(widgetElement, newWidget);
 
-            if (!userScrolledDuringRefresh && Math.abs(topDelta) > 1) {
-                window.scrollBy({ top: topDelta, behavior: 'auto' });
-            }
+    if (willReplaceContent && newContent.querySelector('.calendar')) {
+        await preloadCalendars().catch(error => console.error('Calendar setup failed', error));
+    }
+
+    if (!widgetElement.isConnected) {
+        return;
+    }
+
+    const scrollAnchors = captureScrollAnchors(widgetElement.closest('.page-column'));
+    const collapsibleContainerStates = getCollapsibleContainerStates(widgetElement);
+    const groupTabStates = getGroupTabStates(widgetElement);
+    const hiddenChanged = syncWidgetHiddenState(widgetElement, newWidget);
+
+    if (willReplaceContent) {
+        const savedInputs = {};
+        for (const input of oldContent.querySelectorAll('input[id]')) {
+            if (input.value) savedInputs[input.id] = input.value;
         }
+
+        oldContent.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
+        updateContentPreservingImages(oldContent, newContent);
+
+        for (const [id, value] of Object.entries(savedInputs)) {
+            const input = newContent.querySelector('#' + id);
+            if (input) input.value = value;
+        }
+
+        restoreGroupTabStates(widgetElement, groupTabStates);
+
+        const oldHeader = widgetElement.querySelector('.widget-header');
+        const newHeader = newWidget.querySelector('.widget-header');
+        if (oldHeader && newHeader && oldHeader.innerHTML !== newHeader.innerHTML) {
+            oldHeader.innerHTML = newHeader.innerHTML;
+        }
+
+        runPostSwapSetup();
+        restoreCollapsibleContainerStates(widgetElement, collapsibleContainerStates);
+        setupPlayingProgressUpdater();
+        notifyWidgetUpdated(widgetElement);
+    }
+
+    if (willReplaceContent || hiddenChanged) {
+        restoreScrollAnchors(scrollAnchors);
     }
 }
 
@@ -1729,30 +1778,70 @@ function nowMs() {
     return Date.now();
 }
 
-let userScrollIntentTrackingInitialized = false;
-let lastUserScrollIntentAt = 0;
+function isRectInViewport(rect) {
+    return rect.width > 0
+        && rect.height > 0
+        && rect.bottom > 0
+        && rect.top < window.innerHeight
+        && rect.right > 0
+        && rect.left < window.innerWidth;
+}
 
-function setupUserScrollIntentTracking() {
-    if (userScrollIntentTrackingInitialized) {
-        return;
+function findVisibleAnchorWidget(container) {
+    for (const child of container.children) {
+        if (!child.classList.contains('widget')) continue;
+        if (isRectInViewport(child.getBoundingClientRect())) {
+            return child;
+        }
     }
 
-    const markUserScrollIntent = (event) => {
-        if (event.type === "keydown") {
-            const key = event.key;
-            if (key !== "ArrowUp" && key !== "ArrowDown" && key !== "PageUp" && key !== "PageDown" && key !== "Home" && key !== "End" && key !== " ") {
-                return;
-            }
+    return null;
+}
+
+function captureScrollAnchors(preferredScope = null) {
+    if (window.scrollY <= 0) {
+        return [];
+    }
+
+    const containers = preferredScope
+        ? [preferredScope]
+        : Array.from(document.querySelectorAll('.head-widgets, .page-column'));
+
+    const anchors = [];
+    for (const container of containers) {
+        const widget = findVisibleAnchorWidget(container);
+        if (widget) {
+            anchors.push({
+                widget,
+                topBefore: widget.getBoundingClientRect().top,
+            });
+        }
+    }
+
+    if (anchors.length === 0 && preferredScope) {
+        return captureScrollAnchors(null);
+    }
+
+    return anchors;
+}
+
+function restoreScrollAnchors(anchors) {
+    for (const anchor of anchors) {
+        if (!anchor.widget.isConnected) {
+            continue;
         }
 
-        lastUserScrollIntentAt = nowMs();
-    };
+        const rectAfter = anchor.widget.getBoundingClientRect();
+        if (rectAfter.width === 0 || rectAfter.height === 0) {
+            continue;
+        }
 
-    window.addEventListener("wheel", markUserScrollIntent, { passive: true });
-    window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
-    window.addEventListener("keydown", markUserScrollIntent, { passive: true });
-
-    userScrollIntentTrackingInitialized = true;
+        const topDelta = rectAfter.top - anchor.topBefore;
+        if (Math.abs(topDelta) > 1) {
+            window.scrollBy({ top: topDelta, behavior: 'instant' });
+            return;
+        }
+    }
 }
 
 function remainingDelayMs(intervalMs, lastRunAt) {
@@ -2036,10 +2125,7 @@ function setupWidgetPolling() {
 function captureViewportAnchor() {
     const widget = Array.from(document.querySelectorAll('.widget')).find(w => {
         if (w.querySelector('.widget')) return false;
-        const rect = w.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 &&
-            rect.bottom > 0 && rect.top < window.innerHeight &&
-            rect.right > 0 && rect.left < window.innerWidth;
+        return isRectInViewport(w.getBoundingClientRect());
     });
     if (!widget) return null;
     return {
@@ -2065,21 +2151,22 @@ function restoreViewportAnchor(anchor, behavior) {
 }
 
 async function applyContentUpdate() {
-    setupUserScrollIntentTracking();
-
-    const refreshStartedAt = nowMs();
-    const scrollThreshold = 100;
-    const wasAtBottom = (window.innerHeight + window.scrollY) >= (document.documentElement.scrollHeight - scrollThreshold);
-    const viewportAnchor = captureViewportAnchor();
     const response = await fetchPageContent(pageData);
     const pageContent = response.content;
     const tempDiv = document.createElement("div");
     tempDiv.innerHTML = pageContent;
 
+    if (tempDiv.querySelector('.widget[data-update-interval] .calendar')) {
+        await preloadCalendars().catch(error => console.error('Calendar setup failed', error));
+    }
+
     const realContainers = Array.from(document.querySelectorAll(".head-widgets, .page-column"));
     const tempContainers = Array.from(tempDiv.querySelectorAll(".head-widgets, .page-column"));
 
+    const scrollAnchors = captureScrollAnchors();
+
     let anyReplaced = false;
+    let anyHiddenChanged = false;
     const collapsibleStatesMap = new Map();
     const groupTabStatesMap = new Map();
     const updatedWidgets = [];
@@ -2095,23 +2182,23 @@ async function applyContentUpdate() {
             collapsibleStatesMap.set(realWidget, getCollapsibleContainerStates(realWidget));
             groupTabStatesMap.set(realWidget, getGroupTabStates(realWidget));
 
-            if (realWidget.dataset.updateInterval && realWidget.outerHTML !== tempWidget.outerHTML) {
-                const oldContent = realWidget.querySelector('.widget-content');
-                const newContent = tempWidget.querySelector('.widget-content');
+            if (realWidget.dataset.updateInterval) {
+                const willReplaceContent = hasWidgetContentChanged(realWidget, tempWidget);
+                if (syncWidgetHiddenState(realWidget, tempWidget)) {
+                    anyHiddenChanged = true;
+                }
 
-                if (oldContent && newContent) {
+                if (willReplaceContent) {
+                    const oldContent = realWidget.querySelector('.widget-content');
+                    const newContent = tempWidget.querySelector('.widget-content');
+
+                    oldContent.querySelectorAll('.calendar').forEach(c => c.component?.suspend?.());
                     updateContentPreservingImages(oldContent, newContent);
 
                     const oldHeader = realWidget.querySelector('.widget-header');
                     const newHeader = tempWidget.querySelector('.widget-header');
                     if (oldHeader && newHeader && oldHeader.innerHTML !== newHeader.innerHTML) {
                         oldHeader.innerHTML = newHeader.innerHTML;
-                    }
-
-                    if (tempWidget.dataset.widgetHidden === "true") {
-                        realWidget.dataset.widgetHidden = "true";
-                    } else {
-                        realWidget.removeAttribute("data-widget-hidden");
                     }
 
                     anyReplaced = true;
@@ -2122,28 +2209,11 @@ async function applyContentUpdate() {
     }
 
     if (anyReplaced) {
-        const callbacksIndexBefore = contentReadyCallbacks.length;
-
         for (const [widget, states] of groupTabStatesMap) {
             restoreGroupTabStates(widget, states);
         }
 
-        setupClocks();
-        setupPopovers();
-        setupCarousels();
-        setupCollapsibleLists();
-        setupCollapsibleGrids();
-        setupGroups();
-        setupMasonries();
-        setupImageFallbacks();
-        setupLazyImages();
-        setupTruncatedElementTitles();
-        setupPlayingThumbnailCropping();
-
-        const newCallbacks = contentReadyCallbacks.splice(callbacksIndexBefore);
-        for (const cb of newCallbacks) {
-            cb();
-        }
+        runPostSwapSetup();
 
         for (const [widget, states] of collapsibleStatesMap) {
             restoreCollapsibleContainerStates(widget, states);
@@ -2153,19 +2223,10 @@ async function applyContentUpdate() {
         for (const widget of updatedWidgets) {
             notifyWidgetUpdated(widget);
         }
+    }
 
-        const userScrolledDuringRefresh = lastUserScrollIntentAt > refreshStartedAt;
-
-        if (!userScrolledDuringRefresh) {
-            if (wasAtBottom) {
-                const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-                if (Math.abs(window.scrollY - maxScroll) > 1) {
-                    window.scrollTo({ top: maxScroll, behavior: 'auto' });
-                }
-            } else {
-                restoreViewportAnchor(viewportAnchor, 'auto');
-            }
-        }
+    if (anyReplaced || anyHiddenChanged) {
+        restoreScrollAnchors(scrollAnchors);
     }
 }
 
