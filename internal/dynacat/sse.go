@@ -388,6 +388,8 @@ func (a *application) sseCheckAndPushUpdates(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	for widgetID, w := range a.widgetByID {
+		// Container widgets' leaf children are registered individually in widgetByID,
+		// so skip containers here to avoid broadcasting whole groups or split-columns.
 		switch w.(type) {
 		case *splitColumnWidget, *groupWidget:
 			continue

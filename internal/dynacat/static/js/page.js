@@ -2033,16 +2033,23 @@ function setupWidgetPolling() {
     }
 }
 
+function findViewportAnchorWidget() {
+    return Array.from(document.querySelectorAll('.widget')).find(w => {
+        if (w.querySelector('.widget')) return false;
+        const rect = w.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 &&
+            rect.bottom > 0 && rect.top < window.innerHeight &&
+            rect.right > 0 && rect.left < window.innerWidth;
+    }) || null;
+}
+
 async function applyContentUpdate() {
     setupUserScrollIntentTracking();
 
     const refreshStartedAt = nowMs();
     const scrollThreshold = 100;
     const wasAtBottom = (window.innerHeight + window.scrollY) >= (document.documentElement.scrollHeight - scrollThreshold);
-    const anchorWidget = Array.from(document.querySelectorAll('.widget')).find(widget => {
-        const rect = widget.getBoundingClientRect();
-        return rect.bottom > 0 && rect.top < window.innerHeight;
-    }) || null;
+    const anchorWidget = findViewportAnchorWidget();
     const anchorTopBefore = anchorWidget ? anchorWidget.getBoundingClientRect().top : null;
     const response = await fetchPageContent(pageData);
     const pageContent = response.content;
@@ -2236,12 +2243,7 @@ function _applyWidgetUpdate(widgetId, html) {
     const prevAnchor = htmlElem.style.overflowAnchor;
     htmlElem.style.overflowAnchor = 'none';
 
-    const anchorWidget = Array.from(document.querySelectorAll('.widget')).find(w => {
-        const rect = w.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 &&
-            rect.bottom > 0 && rect.top < window.innerHeight &&
-            rect.right > 0 && rect.left < window.innerWidth;
-    }) || null;
+    const anchorWidget = findViewportAnchorWidget();
     const anchorTopBefore = anchorWidget ? anchorWidget.getBoundingClientRect().top : null;
 
     try {

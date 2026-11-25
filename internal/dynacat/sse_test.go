@@ -42,7 +42,7 @@ func newSSETestLeaf(due bool) *sseTestLeafWidget {
 	w := &sseTestLeafWidget{
 		widgetBase: widgetBase{
 			ID:   widgetIDCounter.Add(1),
-			Type: "html",
+			Type: "sse-test-leaf",
 		},
 	}
 	_ = w.initialize()
@@ -70,6 +70,18 @@ func registerSSETestWidgets(app *application, pg *page, root widget) {
 	}
 }
 
+func newSSETestApp() (*application, *page, *sseClient) {
+	pg := &page{Title: "Home", Slug: "home"}
+	client := &sseClient{ch: make(chan string, 16)}
+	app := &application{
+		DynamicUpdateEnabled: true,
+		widgetByID:           make(map[uint64]widget),
+		widgetToPage:         make(map[uint64]*page),
+		sseClients:           map[*sseClient]struct{}{client: {}},
+	}
+	return app, pg, client
+}
+
 func drainSSEMessages(t *testing.T, ch chan string) []sseBroadcastPayload {
 	t.Helper()
 	var msgs []sseBroadcastPayload
@@ -85,6 +97,35 @@ func drainSSEMessages(t *testing.T, ch chan string) []sseBroadcastPayload {
 			return msgs
 		}
 	}
+}
+
+func assertContainerBroadcastsOnlyDueLeaf(t *testing.T, container widget, dueChild, freshChild *sseTestLeafWidget) sseBroadcastPayload {
+	t.Helper()
+
+	app, pg, client := newSSETestApp()
+	registerSSETestWidgets(app, pg, container)
+
+	app.sseCheckAndPushUpdates(context.Background())
+
+	msgs := drainSSEMessages(t, client.ch)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 SSE broadcast (due leaf only), got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].WidgetID != dueChild.GetID() {
+		t.Fatalf("expected broadcast for leaf widget %d, got %d (container was %d)", dueChild.GetID(), msgs[0].WidgetID, container.GetID())
+	}
+	expectedAttr := fmt.Sprintf(`data-widget-id="%d"`, dueChild.GetID())
+	if !strings.Contains(msgs[0].HTML, expectedAttr) {
+		t.Errorf("expected leaf HTML to contain %s, got %q", expectedAttr, msgs[0].HTML)
+	}
+	if dueChild.updateCount.Load() != 1 {
+		t.Errorf("expected due child updateCount=1, got %d", dueChild.updateCount.Load())
+	}
+	if freshChild.updateCount.Load() != 0 {
+		t.Errorf("expected fresh child updateCount=0, got %d", freshChild.updateCount.Load())
+	}
+
+	return msgs[0]
 }
 
 func TestSSECheckAndPushUpdatesSkipsSplitColumnContainer(t *testing.T) {
@@ -103,38 +144,8 @@ func TestSSECheckAndPushUpdatesSkipsSplitColumnContainer(t *testing.T) {
 	if err := container.initialize(); err != nil {
 		t.Fatalf("splitColumnWidget.initialize() error = %v", err)
 	}
-	dueChild.nextUpdate = time.Now().Add(-time.Second)
-	freshChild.nextUpdate = time.Now().Add(time.Hour)
 
-	pg := &page{Title: "Home", Slug: "home"}
-	client := &sseClient{ch: make(chan string, 16)}
-	app := &application{
-		DynamicUpdateEnabled: true,
-		widgetByID:           make(map[uint64]widget),
-		widgetToPage:         make(map[uint64]*page),
-		sseClients:           map[*sseClient]struct{}{client: {}},
-	}
-	registerSSETestWidgets(app, pg, container)
-
-	app.sseCheckAndPushUpdates(context.Background())
-
-	msgs := drainSSEMessages(t, client.ch)
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 SSE broadcast (due leaf only), got %d: %+v", len(msgs), msgs)
-	}
-	if msgs[0].WidgetID != dueChild.GetID() {
-		t.Fatalf("expected broadcast for leaf widget %d, got %d (container was %d)", dueChild.GetID(), msgs[0].WidgetID, container.GetID())
-	}
-	expectedAttr := fmt.Sprintf(`data-widget-id="%d"`, dueChild.GetID())
-	if !strings.Contains(msgs[0].HTML, expectedAttr) {
-		t.Errorf("expected leaf HTML to contain %s, got %q", expectedAttr, msgs[0].HTML)
-	}
-	if dueChild.updateCount.Load() != 1 {
-		t.Errorf("expected due child updateCount=1, got %d", dueChild.updateCount.Load())
-	}
-	if freshChild.updateCount.Load() != 0 {
-		t.Errorf("expected fresh child updateCount=0, got %d", freshChild.updateCount.Load())
-	}
+	assertContainerBroadcastsOnlyDueLeaf(t, container, dueChild, freshChild)
 }
 
 func TestSSECheckAndPushUpdatesSkipsGroupContainerAndPreservesHideHeader(t *testing.T) {
@@ -153,39 +164,60 @@ func TestSSECheckAndPushUpdatesSkipsGroupContainerAndPreservesHideHeader(t *test
 	if err := container.initialize(); err != nil {
 		t.Fatalf("groupWidget.initialize() error = %v", err)
 	}
-	dueChild.nextUpdate = time.Now().Add(-time.Second)
-	freshChild.nextUpdate = time.Now().Add(time.Hour)
 
-	pg := &page{Title: "Home", Slug: "home"}
-	client := &sseClient{ch: make(chan string, 16)}
-	app := &application{
-		DynamicUpdateEnabled: true,
-		widgetByID:           make(map[uint64]widget),
-		widgetToPage:         make(map[uint64]*page),
-		sseClients:           map[*sseClient]struct{}{client: {}},
+	msg := assertContainerBroadcastsOnlyDueLeaf(t, container, dueChild, freshChild)
+	if strings.Contains(msg.HTML, `class="widget-header"`) {
+		t.Errorf("expected group child to preserve hide-header, got %q", msg.HTML)
 	}
-	registerSSETestWidgets(app, pg, container)
+}
+
+func TestSSECheckAndPushUpdatesIgnoresRegisteredContainersDirectly(t *testing.T) {
+	splitLeaf := newSSETestLeaf(true)
+	splitContainer := &splitColumnWidget{
+		widgetBase: widgetBase{
+			ID:   widgetIDCounter.Add(1),
+			Type: "split-column",
+		},
+		containerWidgetBase: containerWidgetBase{
+			Widgets: widgets{splitLeaf},
+		},
+	}
+	if err := splitContainer.initialize(); err != nil {
+		t.Fatalf("splitColumnWidget.initialize() error = %v", err)
+	}
+
+	groupLeaf := newSSETestLeaf(true)
+	groupContainer := &groupWidget{
+		widgetBase: widgetBase{
+			ID:   widgetIDCounter.Add(1),
+			Type: "group",
+		},
+		containerWidgetBase: containerWidgetBase{
+			Widgets: widgets{groupLeaf},
+		},
+	}
+	if err := groupContainer.initialize(); err != nil {
+		t.Fatalf("groupWidget.initialize() error = %v", err)
+	}
+
+	// Register only the containers (without their children) to deterministically verify
+	// sseCheckAndPushUpdates never updates or broadcasts containers directly.
+	app, pg, client := newSSETestApp()
+	for _, c := range []widget{splitContainer, groupContainer} {
+		app.widgetByID[c.GetID()] = c
+		app.widgetToPage[c.GetID()] = pg
+	}
 
 	app.sseCheckAndPushUpdates(context.Background())
 
 	msgs := drainSSEMessages(t, client.ch)
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 SSE broadcast (due leaf only), got %d: %+v", len(msgs), msgs)
+	if len(msgs) != 0 {
+		t.Fatalf("expected 0 SSE broadcasts for container widgets, got %d: %+v", len(msgs), msgs)
 	}
-	if msgs[0].WidgetID != dueChild.GetID() {
-		t.Fatalf("expected broadcast for leaf widget %d, got %d (container was %d)", dueChild.GetID(), msgs[0].WidgetID, container.GetID())
+	if splitLeaf.updateCount.Load() != 0 {
+		t.Errorf("expected splitLeaf updateCount=0, got %d", splitLeaf.updateCount.Load())
 	}
-	expectedAttr := fmt.Sprintf(`data-widget-id="%d"`, dueChild.GetID())
-	if !strings.Contains(msgs[0].HTML, expectedAttr) {
-		t.Errorf("expected leaf HTML to contain %s, got %q", expectedAttr, msgs[0].HTML)
-	}
-	if strings.Contains(msgs[0].HTML, `class="widget-header"`) {
-		t.Errorf("expected group child to preserve hide-header, got %q", msgs[0].HTML)
-	}
-	if dueChild.updateCount.Load() != 1 {
-		t.Errorf("expected due child updateCount=1, got %d", dueChild.updateCount.Load())
-	}
-	if freshChild.updateCount.Load() != 0 {
-		t.Errorf("expected fresh child updateCount=0, got %d", freshChild.updateCount.Load())
+	if groupLeaf.updateCount.Load() != 0 {
+		t.Errorf("expected groupLeaf updateCount=0, got %d", groupLeaf.updateCount.Load())
 	}
 }
