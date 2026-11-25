@@ -10,6 +10,7 @@ on:
     tags:
       - '*.*.*'
     branches:
+      - 'main'
       - 'beta'
     paths-ignore:
       - 'docs/**'
@@ -77,6 +78,7 @@ jobs:
             ${{ env.DOCKERHUB_USERNAME != '' && format('docker.io/{0}/dynacat', env.DOCKERHUB_USER_LOWER) || '' }}
           tags: |
             type=ref,event=branch
+            type=sha,prefix=main-,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=beta-,enable=${{ github.ref == 'refs/heads/beta' }}
             type=semver,pattern={{version}},enable=${{ !contains(github.ref_name, '-') }}
             type=ref,event=tag,enable=${{ contains(github.ref_name, '-') }}
